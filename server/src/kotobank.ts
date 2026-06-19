@@ -16,21 +16,22 @@ async function paced<T>(fn: () => Promise<T>): Promise<T> {
   return fn();
 }
 
-function authHeaders(): Record<string, string> {
+async function authHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     "User-Agent": UA,
     "Accept-Language": "ja,en;q=0.8",
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   };
-  const cookie = settings.get("kotobank_cookie");
+  const cookie = await settings.get("kotobank_cookie");
   if (cookie) headers["Cookie"] = cookie;
   return headers;
 }
 
 async function fetchHtml(url: string): Promise<string> {
+  const headers = await authHeaders();
   return paced(async () => {
-    const res = await fetch(url, { headers: authHeaders(), redirect: "follow" });
+    const res = await fetch(url, { headers, redirect: "follow" });
     if (!res.ok) {
       throw new Error(`kotobank への取得に失敗しました (${res.status} ${res.statusText}): ${url}`);
     }
@@ -150,16 +151,17 @@ export async function fetchWord(rawUrl: string, force = false): Promise<WordResu
   const url = rawUrl.startsWith("http") ? rawUrl : BASE + rawUrl;
 
   if (!force) {
-    const cached = wordCache.get(url);
+    const cached = await wordCache.get(url);
     if (cached) {
-      const age = Date.now() - new Date(cached.fetched_at.replace(" ", "T")).getTime();
+      const fetchedAt = new Date(cached.fetched_at as unknown as string | Date);
+      const age = Date.now() - fetchedAt.getTime();
       if (Number.isNaN(age) || age < CACHE_TTL_MS) {
         return {
           url,
           headword: cached.headword,
           bodyHtml: cached.body_html,
           cached: true,
-          fetchedAt: cached.fetched_at,
+          fetchedAt: fetchedAt.toISOString(),
         };
       }
     }
@@ -176,7 +178,7 @@ export async function fetchWord(rawUrl: string, force = false): Promise<WordResu
     );
   }
 
-  wordCache.set(url, extracted.headword, extracted.bodyHtml);
+  await wordCache.set(url, extracted.headword, extracted.bodyHtml);
   return {
     url,
     headword: extracted.headword,
@@ -188,8 +190,9 @@ export async function fetchWord(rawUrl: string, force = false): Promise<WordResu
 
 // ログイン(Cookie)が有効かどうかの簡易チェック
 export async function probeAuth(): Promise<{ ok: boolean; status: number; loginRequired: boolean }> {
+  const headers = await authHeaders();
   const res = await paced(() =>
-    fetch(`${BASE}/dictionary/britannica/`, { headers: authHeaders(), redirect: "follow" })
+    fetch(`${BASE}/dictionary/britannica/`, { headers, redirect: "follow" })
   );
   const text = await res.text();
   const loginRequired = /ログインしてください|会員登録|ログインが必要/.test(text);

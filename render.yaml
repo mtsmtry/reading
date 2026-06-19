@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: kotobank-britannica-reader
+    runtime: node
+    plan: free
+    # devDependencies(vite等)も含めてインストールしてからフロントをビルド
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/progress
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Supabase の接続文字列(Session Pooler 推奨)。Render のダッシュボードで設定する
+      - key: DATABASE_URL
+        sync: false

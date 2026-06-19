@@ -1,49 +1,58 @@
-import Database from "better-sqlite3";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
-import { mkdirSync } from "node:fs";
+import pg from "pg";
+import dotenv from "dotenv";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, "..", "..", "data");
-mkdirSync(dataDir, { recursive: true });
+dotenv.config();
 
-export const db = new Database(join(dataDir, "reader.sqlite"));
-db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS bookmarks (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    term       TEXT    NOT NULL,
-    url        TEXT    NOT NULL UNIQUE,
-    page       INTEGER,
-    note       TEXT    DEFAULT '',
-    excerpt    TEXT    DEFAULT '',
-    created_at TEXT    DEFAULT (datetime('now','localtime'))
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  throw new Error(
+    "環境変数 DATABASE_URL が設定されていません。Supabase の接続文字列を設定してください。"
   );
+}
 
-  CREATE TABLE IF NOT EXISTS settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-  );
+// Supabase は SSL 必須。pg のデフォルト検証では弾かれることがあるため緩める。
+const useSsl = !/sslmode=disable/.test(connectionString);
 
-  -- 取得済み本文のローカルキャッシュ（サーバー負荷軽減のため）
-  CREATE TABLE IF NOT EXISTS word_cache (
-    url        TEXT PRIMARY KEY,
-    headword   TEXT,
-    body_html  TEXT,
-    fetched_at TEXT DEFAULT (datetime('now','localtime'))
-  );
+export const pool = new pg.Pool({
+  connectionString,
+  ssl: useSsl ? { rejectUnauthorized: false } : undefined,
+  max: 5,
+});
 
-  -- 読書の進捗（「どこまで読んだか」を1行で保持して次回復帰に使う）
-  CREATE TABLE IF NOT EXISTS reading_progress (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
-    page       INTEGER,
-    item_index INTEGER,
-    url        TEXT,
-    term       TEXT,
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-`);
+export async function initDb(): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS bookmarks (
+      id         SERIAL PRIMARY KEY,
+      term       TEXT NOT NULL,
+      url        TEXT NOT NULL UNIQUE,
+      page       INTEGER,
+      note       TEXT DEFAULT '',
+      excerpt    TEXT DEFAULT '',
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS word_cache (
+      url        TEXT PRIMARY KEY,
+      headword   TEXT,
+      body_html  TEXT,
+      fetched_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS reading_progress (
+      id         INTEGER PRIMARY KEY CHECK (id = 1),
+      page       INTEGER,
+      item_index INTEGER,
+      url        TEXT,
+      term       TEXT,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+  `);
+}
 
 export type BookmarkRow = {
   id: number;
@@ -56,20 +65,22 @@ export type BookmarkRow = {
 };
 
 export const settings = {
-  get(key: string): string | null {
-    const row = db
-      .prepare("SELECT value FROM settings WHERE key = ?")
-      .get(key) as { value: string } | undefined;
-    return row?.value ?? null;
+  async get(key: string): Promise<string | null> {
+    const r = await pool.query<{ value: string }>(
+      "SELECT value FROM settings WHERE key = $1",
+      [key]
+    );
+    return r.rows[0]?.value ?? null;
   },
-  set(key: string, value: string) {
-    db.prepare(
-      `INSERT INTO settings (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-    ).run(key, value);
+  async set(key: string, value: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ($1, $2)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [key, value]
+    );
   },
-  delete(key: string) {
-    db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+  async delete(key: string): Promise<void> {
+    await pool.query("DELETE FROM settings WHERE key = $1", [key]);
   },
 };
 
@@ -82,43 +93,53 @@ export type ProgressRow = {
 };
 
 export const progress = {
-  get(): ProgressRow | null {
-    const row = db
-      .prepare("SELECT page, item_index, url, term, updated_at FROM reading_progress WHERE id = 1")
-      .get() as ProgressRow | undefined;
-    return row ?? null;
+  async get(): Promise<ProgressRow | null> {
+    const r = await pool.query<ProgressRow>(
+      "SELECT page, item_index, url, term, updated_at FROM reading_progress WHERE id = 1"
+    );
+    return r.rows[0] ?? null;
   },
-  set(p: { page: number; itemIndex: number; url: string; term: string }) {
-    db.prepare(
+  async set(p: { page: number; itemIndex: number; url: string; term: string }): Promise<void> {
+    await pool.query(
       `INSERT INTO reading_progress (id, page, item_index, url, term, updated_at)
-       VALUES (1, @page, @itemIndex, @url, @term, datetime('now','localtime'))
-       ON CONFLICT(id) DO UPDATE SET
-         page = excluded.page,
-         item_index = excluded.item_index,
-         url = excluded.url,
-         term = excluded.term,
-         updated_at = excluded.updated_at`
-    ).run(p);
+       VALUES (1, $1, $2, $3, $4, now())
+       ON CONFLICT (id) DO UPDATE SET
+         page = EXCLUDED.page,
+         item_index = EXCLUDED.item_index,
+         url = EXCLUDED.url,
+         term = EXCLUDED.term,
+         updated_at = EXCLUDED.updated_at`,
+      [p.page, p.itemIndex, p.url, p.term]
+    );
   },
 };
 
+export type WordCacheRow = {
+  headword: string;
+  body_html: string;
+  fetched_at: string;
+};
+
 export const wordCache = {
-  get(url: string): { headword: string; body_html: string; fetched_at: string } | undefined {
-    return db
-      .prepare("SELECT headword, body_html, fetched_at FROM word_cache WHERE url = ?")
-      .get(url) as any;
+  async get(url: string): Promise<WordCacheRow | undefined> {
+    const r = await pool.query<WordCacheRow>(
+      "SELECT headword, body_html, fetched_at FROM word_cache WHERE url = $1",
+      [url]
+    );
+    return r.rows[0];
   },
-  set(url: string, headword: string, bodyHtml: string) {
-    db.prepare(
+  async set(url: string, headword: string, bodyHtml: string): Promise<void> {
+    await pool.query(
       `INSERT INTO word_cache (url, headword, body_html, fetched_at)
-       VALUES (?, ?, ?, datetime('now','localtime'))
-       ON CONFLICT(url) DO UPDATE SET
-         headword = excluded.headword,
-         body_html = excluded.body_html,
-         fetched_at = excluded.fetched_at`
-    ).run(url, headword, bodyHtml);
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (url) DO UPDATE SET
+         headword = EXCLUDED.headword,
+         body_html = EXCLUDED.body_html,
+         fetched_at = EXCLUDED.fetched_at`,
+      [url, headword, bodyHtml]
+    );
   },
-  clear() {
-    db.prepare("DELETE FROM word_cache").run();
+  async clear(): Promise<void> {
+    await pool.query("DELETE FROM word_cache");
   },
 };

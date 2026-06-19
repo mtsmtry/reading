@@ -1,24 +1,24 @@
-# ブリタニカ国際大百科事典 小項目事典 ローカルビューア
+# ブリタニカ国際大百科事典 小項目事典 ビューア
 
-[kotobank.jp](https://kotobank.jp/dictionary/britannica/) の「ブリタニカ国際大百科事典 小項目事典」を、**1ページ分の全項目（約70件）を1画面にまとめて閲覧**するためのローカル専用 Web サービスです。TypeScript + React（フロント）と Node/Express（バックエンド）で構成し、しおりは SQLite に保存します。
+[kotobank.jp](https://kotobank.jp/dictionary/britannica/) の「ブリタニカ国際大百科事典 小項目事典」を、**1ページ分の全項目（約70件）を1画面にまとめて閲覧**するための Web サービスです。TypeScript + React（フロント）と Node/Express（バックエンド）で構成し、しおり・読書進捗・本文キャッシュは **Supabase (PostgreSQL)** に保存します。本番は **Render** にデプロイできます。
 
-> ⚠️ **注意**: 本文の著作権は Britannica Japan Co., Ltd. / kotobank に帰属します。本ツールは**個人のローカル閲覧専用**です。全項目の一括ダウンロードは行わず、表示中のページの項目のみをその都度取得します（サーバー負荷を抑えるためレート制限・同時実行制限・ローカルキャッシュを実装）。再配布・商用利用はしないでください。
+> ⚠️ **注意**: 本文の著作権は Britannica Japan Co., Ltd. / kotobank に帰属します。本ツールは**個人の閲覧専用**です。全項目の一括ダウンロードは行わず、表示中のページの項目のみをその都度取得します（サーバー負荷を抑えるためレート制限・同時実行制限・キャッシュを実装）。再配布・商用利用はしないでください。
 
 ## 構成
 
 ```
 reading/
-├─ server/   Express API（kotobank プロキシ / HTML パース / SQLite / 認証）
+├─ server/   Express API（kotobank プロキシ / HTML パース / Postgres / 認証）
 │  └─ src/   index.ts, kotobank.ts, db.ts
 ├─ client/   React + Vite（一覧 / 項目カード / しおり / ログイン設定）
 │  └─ src/
-├─ data/     SQLite データベース（自動生成・gitignore）
-└─ package.json  （npm workspaces）
+├─ render.yaml  Render デプロイ用ブループリント
+└─ package.json （npm workspaces）
 ```
 
-- フロント: `http://localhost:5173`（Vite）
-- API: `http://localhost:5174`（Express）。Vite の `/api` プロキシ経由で呼び出します。
-- DB: `data/reader.sqlite`（しおり `bookmarks` / 設定 `settings` / 本文キャッシュ `word_cache`）
+- フロント: `http://localhost:5173`（Vite。`/api` を `:5174` へプロキシ）
+- API: `http://localhost:5174`（Express）
+- DB: Supabase PostgreSQL（テーブル `bookmarks` / `settings` / `word_cache` / `reading_progress` は起動時に自動作成）
 
 ## セットアップ
 
@@ -26,18 +26,27 @@ Node.js 18 以上（推奨 20+）が必要です。
 
 ```bash
 npm install
+# ネットワーク/権限の都合でホームの npm キャッシュが使えない場合:
+# npm install --cache "$PWD/.npmcache"
 ```
 
-> ※ ネットワーク/権限の都合でホームの npm キャッシュが使えない場合は
-> `npm install --cache "$PWD/.npmcache"` を使ってください。
+### 環境変数（必須）
 
-## 起動
+`server/.env` に Supabase の接続文字列を設定します（`server/.env.example` 参照）。
+
+```bash
+DATABASE_URL=postgresql://postgres:<PASSWORD>@db.<ref>.supabase.co:5432/postgres
+```
+
+接続文字列は Supabase ダッシュボードの **Project Settings → Database → Connection string** で取得できます。
+
+## 起動（ローカル開発）
 
 ```bash
 npm run dev
 ```
 
-サーバーとクライアントが同時に起動します。ブラウザで `http://localhost:5173` を開いてください。
+サーバーとクライアントが同時に起動します。ブラウザで `http://localhost:5173` を開いてください。初回起動時に必要なテーブルが Supabase 上へ自動作成されます。
 
 個別に起動する場合:
 
@@ -45,6 +54,24 @@ npm run dev
 npm run dev:server   # API のみ
 npm run dev:client   # フロントのみ
 ```
+
+## Render へのデプロイ
+
+リポジトリ直下の `render.yaml`（Blueprint）を使うと、API とビルド済みフロントを **1つの Web Service** で配信します。
+
+1. このリポジトリを GitHub に push。
+2. Render で **New → Blueprint** を選び、リポジトリを指定（`render.yaml` が自動検出されます）。
+3. 環境変数 **`DATABASE_URL`** を設定する。
+   - ⚠️ **Render では Supabase の「Pooler」接続文字列（IPv4対応・ユーザー名は `postgres.<ref>` 形式）を使ってください。**
+     直結の `db.<ref>.supabase.co:5432` は IPv6 専用で Render から接続できない場合があります。
+   - 例（Transaction pooler / 6543）: `postgresql://postgres.<ref>:<PASSWORD>@aws-1-<region>.pooler.supabase.com:6543/postgres`
+   - 例（Session pooler / 5432）も可。Supabase ダッシュボード → Database → Connection string → **Session/Transaction pooler** から取得。
+4. デプロイ完了後、表示された URL にアクセス。
+
+ビルド/起動コマンド（`render.yaml` に定義済み）:
+
+- Build: `npm install --include=dev && npm run build`（client を `client/dist` にビルド）
+- Start: `npm start`（`NODE_ENV=production` で Express が API + `client/dist` を配信）
 
 ## 使い方
 
@@ -54,9 +81,9 @@ npm run dev:client   # フロントのみ
 - **参照のみ項目の非表示**: 「『〜』のページをご覧ください。」のような参照だけの項目は本文取得時に検出して非表示にします。
 - **本文の自動表示**: ヘッダーの「本文を自動表示」チェックで、各カードの本文を自動取得するか切り替え（同時取得数は4件に制限）。
 - **絞り込み**: ツールバーの入力欄で、表示中ページ内を項目名でフィルタ。
-- **しおり**: 各カードの ☆ で追加/解除。右上「しおり」ボタンで一覧を開き、メモの追加・削除ができます。しおりは SQLite に永続化されます。
+- **しおり**: 各カードの ☆ で追加/解除。右上「しおり」ボタンで一覧を開き、メモの追加・削除ができます。しおりは Supabase (PostgreSQL) に永続化されます。
 - **再取得**: 各カード右上の ↻ アイコンでキャッシュを無視して再取得します。
-- **読書の進捗（自動復帰）**: 各カードが画面内に一定割合（55%）以上、一定時間（約2.5秒）表示され続けると「既読」と判定し、最も先まで読んだ位置を SQLite に保存します。次回起動時はそのページを開き、「前回の続き」バーの「ここから再開」で前回位置へスクロールできます（保存ページの一覧表示時には自動でもスクロールします）。既読のカードには ✓ と淡色背景が付きます。
+- **読書の進捗（自動復帰）**: 各カードが画面内に一定割合（55%）以上、一定時間（約2.5秒）表示され続けると「既読」と判定し、最も先まで読んだ位置を Supabase (PostgreSQL) に保存します。次回起動時はそのページを開き、「前回の続き」バーの「ここから再開」で前回位置へスクロールできます（保存ページの一覧表示時には自動でもスクロールします）。既読のカードには ✓ と淡色背景が付きます。
   - 進捗は **単調増加** で、前の項目に戻っても後退しません。
   - 進む判定には **連続性** を条件にしており、同一ページ内の前進、または直後のページ（次ページ）への前進のみ進捗を更新します。たとえば1ページを読んだ後に100ページへ飛んでも、100ページが読了になることはありません（飛んだ先では進捗は更新されません）。
 
@@ -70,7 +97,7 @@ npm run dev:client   # フロントのみ
 4. 設定画面のテキスト欄に貼り付けて「Cookie を保存」。
 5. 「接続テスト」で疎通とログイン要求の有無を確認できます。
 
-Cookie はこのローカル PC 内の `data/reader.sqlite`（`settings` テーブル）にのみ保存され、外部送信先は kotobank.jp のみです。`.gitignore` で DB は除外済みです。
+Cookie は Supabase の `settings` テーブルに保存され、kotobank への取得リクエスト時のみ使用されます。接続情報（`DATABASE_URL`）は `server/.env`（gitignore 済み）や Render の環境変数で管理してください。
 
 ## API（参考）
 
