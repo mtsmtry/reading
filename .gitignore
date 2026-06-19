@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.npmcache/
+
+# ローカルのみで保持する機微情報・データ
+*.sqlite
+*.sqlite-journal
+data/
+.env
+.env.local
