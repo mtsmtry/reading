@@ -104,7 +104,7 @@ app.delete(
 app.get(
   "/api/progress",
   asyncRoute(async (_req, res) => {
-    res.json(await progress.get());
+    res.json(await progress.getState());
   })
 );
 
@@ -120,8 +120,8 @@ app.put(
     if (page == null || itemIndex == null || !url || !term) {
       return res.status(400).json({ error: "page, itemIndex, url, term が必要です" });
     }
-    await progress.set({ page, itemIndex, url, term });
-    res.json(await progress.get());
+    const state = await progress.record({ page, itemIndex, url, term });
+    res.json(state);
   })
 );
 

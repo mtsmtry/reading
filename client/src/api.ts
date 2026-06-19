@@ -1,4 +1,4 @@
-import type { AuthStatus, Bookmark, ListResult, Progress, WordResult } from "./types";
+import type { AuthStatus, Bookmark, ListResult, ProgressState, WordResult } from "./types";
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
@@ -76,10 +76,10 @@ export const api = {
       method: "DELETE",
     }),
 
-  getProgress: () => jsonFetch<Progress>(`/api/progress`),
+  getProgress: () => jsonFetch<ProgressState>(`/api/progress`),
 
   saveProgress: (p: { page: number; itemIndex: number; url: string; term: string }) =>
-    jsonFetch<Progress>(`/api/progress`, {
+    jsonFetch<ProgressState>(`/api/progress`, {
       method: "PUT",
       body: JSON.stringify(p),
     }),

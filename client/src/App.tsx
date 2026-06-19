@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Bookmark, ListItem, Progress } from "./types";
+import type { Bookmark, ListItem, ProgressState } from "./types";
 import { ItemCard } from "./components/ItemCard";
 import { AuthPanel } from "./components/AuthPanel";
 import { BookmarksPanel } from "./components/BookmarksPanel";
@@ -37,16 +37,17 @@ export default function App() {
     [bookmarks]
   );
 
-  const { data: progress, isFetched: progressLoaded } = useQuery<Progress>({
+  const { data: state, isFetched: progressLoaded } = useQuery<ProgressState>({
     queryKey: ["progress"],
     queryFn: api.getProgress,
     staleTime: Infinity,
   });
+  const last = state?.last ?? null;
   // handleRead から最新の進捗を同期的に参照するための ref
-  const progressRef = useRef<Progress>(null);
+  const stateRef = useRef<ProgressState>({ last: null, pages: {} });
   useEffect(() => {
-    progressRef.current = progress ?? null;
-  }, [progress]);
+    if (state) stateRef.current = state;
+  }, [state]);
 
   const goPage = (p: number) => {
     const next = Math.max(1, p);
@@ -70,56 +71,47 @@ export default function App() {
     if (restoredPageRef.current) return;
     if (hadUrlPageRef.current) {
       restoredPageRef.current = true;
-    } else if (progress?.page) {
+    } else if (last?.page) {
       restoredPageRef.current = true;
-      goPage(progress.page);
-    } else if (progress === null) {
+      goPage(last.page);
+    } else if (state) {
       restoredPageRef.current = true;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [progress]);
+  }, [state]);
 
   /* ---- 復帰: 保存ページの一覧が出たら一度だけ前回項目までスクロール ---- */
   const autoScrolledRef = useRef(false);
   useEffect(() => {
     if (autoScrolledRef.current) return;
-    if (list && progress && progress.page === page && list.items.some((i) => i.href === progress.url)) {
+    if (list && last && last.page === page && list.items.some((i) => i.href === last.url)) {
       autoScrolledRef.current = true;
-      window.setTimeout(() => scrollToUrl(progress.url), 350);
+      window.setTimeout(() => scrollToUrl(last.url), 350);
     }
-  }, [list, progress, page]);
+  }, [list, last, page]);
 
   /* ---- 進捗の保存（読んだ位置を debounce 保存） ---- */
   const saveProgress = useMutation({
     mutationFn: api.saveProgress,
-    onSuccess: (p) => qc.setQueryData(["progress"], p),
+    onSuccess: (s) => qc.setQueryData(["progress"], s),
   });
   const saveTimer = useRef<number | undefined>(undefined);
 
-  // 読了位置を進めてよいか判定:
-  //  - 既読位置より「後ろ」へは戻さない（単調増加）
-  //  - 飛び（例: 1ページ→100ページ）では進めない。同一ページ内の前進、
-  //    または直後のページ(cp+1)への前進＝連続性がある場合のみ進める
-  function shouldAdvance(curr: Progress, p: number, index: number): boolean {
-    if (!curr) return true; // 進捗未確立なら現在地を基準として確立
-    if (p === curr.page) return index > curr.item_index;
-    if (p === curr.page + 1) return true;
-    return false;
-  }
-
+  // 既読判定はページごとの到達点(ハイウォーターマーク)。
+  //  - 同一ページ内では index 以下を既読扱い（スクロール到達点まで連続）
+  //  - ページをまたいだ移動は制限せず、各ページが独立に到達点を持つ
   function handleRead(index: number, item: ListItem) {
     if (!progressLoaded) return; // サーバーの進捗が読み込まれるまで待つ
-    const curr = progressRef.current;
-    if (!shouldAdvance(curr, page, index)) return;
+    const cur = stateRef.current;
+    const key = String(page);
+    const curMax = cur.pages[key] ?? -1;
+    if (index <= curMax) return; // すでに既読範囲内（後退しない）
 
-    const next: Progress = {
-      page,
-      item_index: index,
-      url: item.href,
-      term: item.term,
-      updated_at: new Date().toISOString(),
+    const next: ProgressState = {
+      last: { page, item_index: index, url: item.href, term: item.term, updated_at: new Date().toISOString() },
+      pages: { ...cur.pages, [key]: index },
     };
-    progressRef.current = next;
+    stateRef.current = next;
     qc.setQueryData(["progress"], next); // 楽観的更新（即時に既読表示へ反映）
 
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -155,22 +147,13 @@ export default function App() {
     return list.items.filter((i) => i.term.includes(q));
   }, [list, filter]);
 
-  // 現在ページにおける既読の境界（このindex以下を既読扱い）
-  //  - 進捗ページより前のページ: すべて既読
-  //  - 進捗ページ: 保存されたindexまで
-  //  - 進捗ページより後: 未読
-  const furthest = useMemo(() => {
-    if (!progress) return -1;
-    if (page < progress.page) return Number.POSITIVE_INFINITY;
-    if (page === progress.page) return progress.item_index;
-    return -1;
-  }, [progress, page]);
+  // 現在ページの既読到達点（このindex以下を既読扱い）。ページごとに独立。
+  const furthest = state?.pages[String(page)] ?? -1;
 
-  const readCount =
-    list && furthest >= 0 ? Math.min(list.items.length, furthest + 1) : 0;
+  const readCount = list && furthest >= 0 ? Math.min(list.items.length, furthest + 1) : 0;
 
   const showResumeBanner =
-    progress && progress.page === page && list?.items.some((i) => i.href === progress.url);
+    last && last.page === page && list?.items.some((i) => i.href === last.url);
 
   return (
     <div className="app">
@@ -206,18 +189,18 @@ export default function App() {
         </div>
       </header>
 
-      {progress && (
+      {last && (
         <div className="resume-bar">
           <span>
-            前回の続き: <strong>{progress.term}</strong>（p.{progress.page}）まで読了
+            前回の続き: <strong>{last.term}</strong>（p.{last.page}）まで読了
           </span>
           {showResumeBanner ? (
-            <button className="primary" onClick={() => scrollToUrl(progress.url)}>
+            <button className="primary" onClick={() => scrollToUrl(last.url)}>
               ここから再開
             </button>
           ) : (
-            <button className="primary" onClick={() => goPage(progress.page)}>
-              p.{progress.page} を開く
+            <button className="primary" onClick={() => goPage(last.page)}>
+              p.{last.page} を開く
             </button>
           )}
         </div>

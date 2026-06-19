@@ -35,10 +35,15 @@ export type AuthStatus = {
   cookiePreview: string | null;
 };
 
-export type Progress = {
+export type ProgressLast = {
   page: number;
   item_index: number;
   url: string;
   term: string;
   updated_at: string;
 } | null;
+
+export type ProgressState = {
+  last: ProgressLast;
+  pages: Record<string, number>;
+};

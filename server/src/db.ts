@@ -43,12 +43,20 @@ export async function initDb(): Promise<void> {
       fetched_at TIMESTAMPTZ DEFAULT now()
     );
 
+    -- 「前回の続き」用: 最後に前進した読書位置を1行で保持
     CREATE TABLE IF NOT EXISTS reading_progress (
       id         INTEGER PRIMARY KEY CHECK (id = 1),
       page       INTEGER,
       item_index INTEGER,
       url        TEXT,
       term       TEXT,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    -- ページごとの既読到達点(ハイウォーターマーク)
+    CREATE TABLE IF NOT EXISTS page_progress (
+      page       INTEGER PRIMARY KEY,
+      max_index  INTEGER NOT NULL,
       updated_at TIMESTAMPTZ DEFAULT now()
     );
   `);
@@ -84,7 +92,7 @@ export const settings = {
   },
 };
 
-export type ProgressRow = {
+export type ProgressLast = {
   page: number;
   item_index: number;
   url: string;
@@ -92,25 +100,57 @@ export type ProgressRow = {
   updated_at: string;
 };
 
+export type ProgressState = {
+  last: ProgressLast | null;
+  pages: Record<string, number>; // page番号(文字列) -> 既読到達index
+};
+
 export const progress = {
-  async get(): Promise<ProgressRow | null> {
-    const r = await pool.query<ProgressRow>(
+  async getState(): Promise<ProgressState> {
+    const lastRes = await pool.query<ProgressLast>(
       "SELECT page, item_index, url, term, updated_at FROM reading_progress WHERE id = 1"
     );
-    return r.rows[0] ?? null;
-  },
-  async set(p: { page: number; itemIndex: number; url: string; term: string }): Promise<void> {
-    await pool.query(
-      `INSERT INTO reading_progress (id, page, item_index, url, term, updated_at)
-       VALUES (1, $1, $2, $3, $4, now())
-       ON CONFLICT (id) DO UPDATE SET
-         page = EXCLUDED.page,
-         item_index = EXCLUDED.item_index,
-         url = EXCLUDED.url,
-         term = EXCLUDED.term,
-         updated_at = EXCLUDED.updated_at`,
-      [p.page, p.itemIndex, p.url, p.term]
+    const pagesRes = await pool.query<{ page: number; max_index: number }>(
+      "SELECT page, max_index FROM page_progress"
     );
+    const pages: Record<string, number> = {};
+    for (const r of pagesRes.rows) pages[String(r.page)] = r.max_index;
+    return { last: lastRes.rows[0] ?? null, pages };
+  },
+
+  async record(p: {
+    page: number;
+    itemIndex: number;
+    url: string;
+    term: string;
+  }): Promise<ProgressState> {
+    // ページごとの到達点を max で更新（後退しない）
+    const r = await pool.query<{ max_index: number }>(
+      `INSERT INTO page_progress (page, max_index, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (page) DO UPDATE SET
+         max_index = GREATEST(page_progress.max_index, EXCLUDED.max_index),
+         updated_at = now()
+       RETURNING max_index`,
+      [p.page, p.itemIndex]
+    );
+    const newMax = r.rows[0].max_index;
+
+    // この読了が「前進」だった場合のみ、前回の続き位置を更新
+    if (p.itemIndex >= newMax) {
+      await pool.query(
+        `INSERT INTO reading_progress (id, page, item_index, url, term, updated_at)
+         VALUES (1, $1, $2, $3, $4, now())
+         ON CONFLICT (id) DO UPDATE SET
+           page = EXCLUDED.page,
+           item_index = EXCLUDED.item_index,
+           url = EXCLUDED.url,
+           term = EXCLUDED.term,
+           updated_at = EXCLUDED.updated_at`,
+        [p.page, p.itemIndex, p.url, p.term]
+      );
+    }
+    return this.getState();
   },
 };
 
